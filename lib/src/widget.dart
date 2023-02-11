@@ -351,7 +351,11 @@ class _AsyncSIWidgetState extends State<_AsyncSIWidget> {
   @override
   void dispose() {
     super.dispose();
-    widget._cache.removeReference(widget._siSource);
+    try {
+      widget._cache.removeReference(widget._siSource);
+    } catch (e) {
+      widget._siSource.warnF?.call(e.toString());
+    }
   }
 
   @override
