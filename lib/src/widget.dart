@@ -341,8 +341,11 @@ class _AsyncSIWidgetState extends State<_AsyncSIWidget> {
   @override
   void initState() {
     super.initState();
-    Future<ScalableImage> si = widget._cache.addReference(widget._siSource);
-    _registerWithFuture(widget._siSource, si);
+    _si = widget._cache.getFromCache(widget._siSource);
+    if (_si == null) {
+      Future<ScalableImage> si = widget._cache.addReference(widget._siSource);
+      _registerWithFuture(widget._siSource, si);
+    }
   }
 
   @override
@@ -355,15 +358,17 @@ class _AsyncSIWidgetState extends State<_AsyncSIWidget> {
   void didUpdateWidget(_AsyncSIWidget old) {
     super.didUpdateWidget(old);
     if (old._siSource != widget._siSource || old._cache != widget._cache) {
-      Future<ScalableImage> si = widget._cache.addReference(widget._siSource);
       old._cache.removeReference(old._siSource);
-      _si = null;
-      _registerWithFuture(widget._siSource, si);
+      _si = widget._cache.getFromCache(widget._siSource);
+      if (_si == null) {
+        Future<ScalableImage> si = widget._cache.addReference(widget._siSource);
+        _registerWithFuture(widget._siSource, si);
+      }
     }
   }
 
   void _registerWithFuture(ScalableImageSource src, Future<ScalableImage> si) {
-    unawaited(si.then((ScalableImage a) {
+    si.then((ScalableImage a) {
       if (mounted && widget._siSource == src) {
         // If it's not stale, perhaps due to reparenting
         setState(() => _si = a);
@@ -373,7 +378,7 @@ class _AsyncSIWidgetState extends State<_AsyncSIWidget> {
       if (mounted && widget._siSource == src) {
         setState(() => _si = _error);
       }
-    }));
+    });
   }
 
   @override
@@ -413,6 +418,7 @@ abstract class ScalableImageSource {
   ///
   @Deprecated('Use createSI instead')
   Future<ScalableImage> get si => throw StateError('Use createSI() instead');
+
   // NOTE:  Any subclasses created prior to 1.0.7 will have overridden this
   // method, because it was abstract.  No code created from 1.0.7 on should
   // call it, so the StateError is OK.
@@ -650,6 +656,7 @@ class _AvdBundleSource extends ScalableImageSource {
   final bool warn;
   @override
   final void Function(String)? warnF;
+
   _AvdBundleSource(this.bundle, this.key,
       {required this.compact,
       required this.bigFloats,
@@ -882,39 +889,33 @@ class _SIBundleSource extends ScalableImageSource {
 // Flutter's LinkedListEntry<T> didn't quite fit, and it's not like a
 // doubly-linked list is hard, anyway.
 class _CacheEntry {
-  final ScalableImageSource? _siSrc;
-  final Future<ScalableImage>? _si;
-  int _refCount = 0;
-  _CacheEntry? _moreRecent;
-  _CacheEntry? _lessRecent;
-  // Invariant:  If refCount is 0, _moreRecent and _lessRecent are non-null
-  // Invariant:  If _moreRecent is null, refCount > 0
-  // Invariant:  If _lessRecent is null, refCount > 0
-
-  _CacheEntry(ScalableImageSource this._siSrc, Future<ScalableImage> this._si);
+  _CacheEntry(ScalableImageSource this._siSrc, ScalableImage this._si);
 
   _CacheEntry._null()
       : _siSrc = null,
         _si = null;
+
+  final ScalableImageSource? _siSrc;
+  final ScalableImage? _si;
+
+  /// Invariant:  If refCount is 0, _moreRecent and _lessRecent are non-null
+  /// Invariant:  If _moreRecent is null, refCount > 0
+  /// Invariant:  If _lessRecent is null, refCount > 0
+  int _refCount = 0;
+  _CacheEntry? _moreRecent;
+  _CacheEntry? _lessRecent;
 }
 
-///
-/// An LRU cache of [ScalableImage] futures derived from [ScalableImageSource]
-/// instances.  A cache with a non-zero size could make
-/// sense, for example,  as part of the state of a
-/// stateful widget that builds entries on demand, and that uses
-/// [ScalableImageWidget.fromSISource] to asynchronously load scalable images.
-/// See, for example, `cache.dart` in the `example` directory.
-///
-/// For a discussion of caching and potential reloading, see
-/// https://github.com/zathras/jovial_svg/issues/10.
-///
-/// If different caching semantics are desired, user code can implement
-/// [ScalableImageCache]; [ScalableImageWidget] does not use any of its
-/// private members.  See also the `demo_hive` application to see how
-/// [ScalableImageSource] can be extended to load from a persistent cache.
-///
 class ScalableImageCache {
+  /// Create an image cache that holds up to [size] image sources.
+  /// A [ScalableImageCache] will always keep referenced [ScalableImageSource]
+  /// instances, even if this exceeds the cache size.  In this case, no
+  /// unreferenced images would be kept.
+  ScalableImageCache({int size = 0}) : _size = size {
+    _lruList._lessRecent = _lruList;
+    _lruList._moreRecent = _lruList;
+  }
+
   final _canonicalized = <ScalableImageSource, _CacheEntry>{};
 
   int _size;
@@ -925,34 +926,20 @@ class ScalableImageCache {
   // _lruList._moreRecent.
   final _lruList = _CacheEntry._null();
 
-  ///
-  /// Create an image cache that holds up to [size] image sources.
-  /// A [ScalableImageCache] will always keep referenced [ScalableImageSource]
-  /// instances, even if this exceeds the cache size.  In this case, no
-  /// unreferenced images would be kept.
-  ///
-  ScalableImageCache({int size = 0}) : _size = size {
-    _lruList._lessRecent = _lruList;
-    _lruList._moreRecent = _lruList;
-  }
-
-  ///
-  /// A default cache.  By default, this cache holds zero unreferenced
-  /// image sources.
+  /// A default cache.
+  /// By default, this cache holds 15 unreferenced image sources.
   ///
   /// This isn't exposed.  On balance, the extremely slight chance of slightly
   /// more convenient instance-sharing isn't worth the slight chance that
   /// someone might think it's OK to change the size to something bigger
   /// than zero, and thereby potentially cause other modules to consume
   /// memory with large, retained assets.
-  ///
-  static final _defaultCache = ScalableImageCache(size: 0);
+  static final _defaultCache = ScalableImageCache(size: 15);
 
-  ///
   /// The size of the cache.  If the cache holds unreferenced images, the total
   /// number of images will be held to this size.
-  ///
   int get size => _size;
+
   set size(int val) {
     if (val < 0) {
       throw ArgumentError.value(val, 'cache size');
@@ -961,7 +948,15 @@ class ScalableImageCache {
     _trimLRU();
   }
 
-  ///
+  ScalableImage? getFromCache(ScalableImageSource src) {
+    final _CacheEntry? e = _canonicalized[src];
+    final ScalableImage? s = e?._si;
+    if (s != null) {
+      addReference(src);
+    }
+    return s;
+  }
+
   /// Called when a [ScalableImageSource] is referenced,
   /// e.g. in a stateful widget's [State] object's `initState` method.
   /// Returns a Future for the scalable image.  Always
@@ -970,11 +965,10 @@ class ScalableImageCache {
   ///
   /// Application code should use the returned future, and not use
   /// [ScalableImageSource.createSI] directly.
-  ///
-  Future<ScalableImage> addReference(ScalableImageSource src) {
+  Future<ScalableImage> addReference(ScalableImageSource src) async {
     _CacheEntry? e = _canonicalized[src];
     if (e == null) {
-      e = _CacheEntry(src, src.createSI());
+      e = _CacheEntry(src, await src.createSI());
       _canonicalized[src] = e;
     } else {
       _verifyCorrectHash(src, e._siSrc!);
@@ -998,18 +992,18 @@ class ScalableImageCache {
       throw ArgumentError('Found key $found that is != search: $key');
     }
     if (key.hashCode != found.hashCode) {
-      throw ArgumentError('Key $key hash ${key.hashCode} is == existing key '
-          '$found, hash ${found.hashCode}');
+      throw ArgumentError(
+        'Key $key hash ${key.hashCode} is == existing key '
+        '$found, hash ${found.hashCode}',
+      );
     }
   }
 
-  ///
   /// Called when a source is dereferenced, e.g. by a stateful widget's
   /// [State] object being disposed.  Throws an exception if there had been
   /// no matching call to [addReference] for this source.
-  ///
   void removeReference(ScalableImageSource src) {
-    _CacheEntry? e = _canonicalized[src];
+    final _CacheEntry? e = _canonicalized[src];
     if (e == null) {
       throw ArgumentError.value(src, 'Not in cache', 'src');
     } else if (e._refCount <= 0) {
@@ -1023,16 +1017,14 @@ class ScalableImageCache {
     }
   }
 
-  ///
   /// If the image referenced by src is in the cache, force it to be
   /// reloaded the next time it is used.
-  ///
-  void forceReload(ScalableImageSource src) {
+  Future<void> forceReload(ScalableImageSource src) async {
     final _CacheEntry? old = _canonicalized.remove(src);
     if (old == null) {
       return;
     }
-    final e = _CacheEntry(src, src.createSI());
+    final e = _CacheEntry(src, await src.createSI());
     _canonicalized[src] = e;
     if (old._refCount > 0) {
       e._refCount = old._refCount;
